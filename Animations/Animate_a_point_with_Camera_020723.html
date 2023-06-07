@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Animate the camera along a path</title>
+<meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+<link href="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.css" rel="stylesheet">
+<script src="https://api.mapbox.com/mapbox-gl-js/v2.10.0/mapbox-gl.js"></script>
+<br><br>
+
+<style>
+body { margin: 0; padding: 0; }
+#map { position: absolute; top: 0; bottom: 0; width: 100%; }
+#inset { position:absolute; top:5%; right:1%; height:300px; width:25%;}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+<div id='inset'></div>
+<span id="buttons"><button id="pause"></button>
+<button id="fit" disabled></button></span>
+<!--Select Dataset-->
+
+
+<select name="dataset" id="dataset" onchange="DatasetSelection()">
+    <option value="Dataset_1">Spring 2019</option>
+    <option value="Dataset_2">Fall 2019</option>
+    <option value="Dataset_3">Dataset TBD</option>
+    <option value="Dataset_4">Dataset TBD</option>
+</select>
+
+<style>
+    #buttons{
+    position: absolute;
+    top:2%;
+    left:1%;
+    }
+    #pause {
+     min-width: 45px;
+    }
+    #pause::after {
+    content: 'Pause';
+    }
+     
+    #pause.pause::after {
+    content: 'Play';
+    }
+
+    #fit {
+    text-align: center;
+    }
+
+    #fit::after {
+    content: 'Full Migration Route';
+    }
+     
+    #fit.Full_Migration_Route::after {
+    content: 'Back';
+    }
+
+    #dataset{
+    position: absolute;
+    top:2.1%;
+    left:212px;
+    }
+
+    .marker {
+    background-image: url('data\Deer_Marker\Deer_icon.png');
+    background-size: cover;
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    cursor: pointer;
+    }
+</style>
+
+
+<script src="data\Camera_Line\Camera_target_Spring2019.geojson"></script>
+<script src="data\Camera_Line\Camera_Line_Spring2019.geojson"></script>
+<script src="data\Camera_Line\Camera_Line_Fall2019.geojson"></script>
+<script src="data\Camera_Line\Camera_target_Fall2019.geojson"></script>
+<!-- <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script> -->
+<script src="data\Migration_Line\Migration_Spring2019.geojson"></script>
+<script src="data\Migration_Line\Migration_Fall2019.geojson"></script>
+<script src='https://api.mapbox.com/mapbox.js/plugins/turf/v3.0.11/turf.min.js'></script>
+
+<script>
+
+
+    //Default Data --> Data 1
+    var targetRoute = cameraTarget_Spring2019.features[0].geometry.coordinates;
+    var cameraRoute = cameraLine_Spring2019.features[0].geometry.coordinates; 
+    var current_migration = migration_Spring2019;
+    var maxFrame = current_migration.features[0].geometry.coordinates.length; //for the looping in pointOnJSON function
+    var migration_bounds = turf.bbox(current_migration); // a backup method for frame the map to the bound
+    var select_change_time = 0; //record a timestamp when doing a selection
+
+    //Select Data
+    function DatasetSelection(timestamp) {
+        var selected_dataset = document.getElementById("dataset").value;
+        if (selected_dataset == 'Dataset_1') {
+            console.log("You just selected Dataset 1")
+            targetRoute = cameraTarget_Spring2019.features[0].geometry.coordinates;
+            cameraRoute = cameraLine_Spring2019.features[0].geometry.coordinates; 
+            current_migration = migration_Spring2019;
+            // Restart
+            startTime = 0;
+            real_time = 0;
+            progress = 0;
+            start = 0.00;
+            phase = 0;
+            select_change_time = timestamp;
+            maxFrame = current_migration.features[0].geometry.coordinates.length;
+            migration_bounds = turf.bbox(current_migration);
+        }
+        if (selected_dataset == 'Dataset_2') {
+            console.log("You just selected Dataset 2")
+            targetRoute = cameraTarget_Fall2019.features[0].geometry.coordinates;
+            cameraRoute = cameraLine_Fall2019.features[0].geometry.coordinates; 
+            current_migration = migration_Fall2019;
+            // Restart
+            startTime = 0;
+            real_time = 0;
+            progress = 0;
+            start = 0.00;
+            phase = 0;
+            select_change_time = timestamp;
+            maxFrame = current_migration.features[0].geometry.coordinates.length;
+            migration_bounds = turf.bbox(current_migration);
+        }
+        if (selected_dataset == 'Dataset_3') {
+            console.log("You just selected Dataset 3")
+        }
+        if (selected_dataset == 'Dataset_4') {
+            console.log("You just selected Dataset 4")
+        }
+    }
+    //variables
+    let animation; // to store and cancel the animation
+    let startTime = 0; // for storing the progress of the point animation
+    let real_time = 0; // for the looping in pointOnJSON function
+    let progress = 0; // cumulative span of time that the point/camera has moved 
+    var resetTime = false; // indicator of whether time reset is needed for the animation
+    var pause_status = false; // indicator of whether it is pausing now
+    const pauseButton = document.getElementById('pause');
+    const fitButton = document.getElementById('fit');
+    let start = 0.00; // for storing the progress of the camera animation
+    let phase; // cumulative percentage of time that the camera has moved 
+    let bound_status = false; // a status indicator for the camera to move to the bound
+    let camera; // for storing the current camera properties 
+    let mapBearin;
+    let mapPitch;
+    let max_snow_layer = 2; //Maximum number of Snow Layers
+    let current_snowfall_layer = 1;
+
+
+    //Inset Map
+    mapboxgl.accessToken = 'pk.eyJ1Ijoiemhhb3h1c3VpIiwiYSI6ImNsOTRwZ2R4bDI1cGszbnBjbzFlaG40NTAifQ.2K_zqPRquP6HGruoSSUwxw';
+    var inset = new mapboxgl.Map({
+         container: 'inset', // id of a div on your page, where the map will be inserted
+         style: 'mapbox://styles/zhaoxusui/clb5orlv0000g14oem7lt2t2b', // stylesheet location
+    });
+
+    inset.fitBounds(migration_bounds, {
+        padding: 50
+    });
+    
+    //Main map
+    const map = new mapboxgl.Map({
+        container: 'map',
+        // zoom: 10,
+        // center: [-108.945, 41.782],
+        // pitch: 50,
+        // bearing: -180,
+        // Choose from Mapbox's core styles, or make your own style with Mapbox Studio
+        style: 'mapbox://styles/zhaoxusui/cl97k5rjk000114q4fs242uo1',
+        interactive: true
+    });
+
+    //Update the location of Camera on the inset map
+    const updateCameraPositionMarker = () => {
+        const camera = map.getFreeCameraOptions();
+        const cameraPosition = camera._position.toLngLat();
+        inset.getSource("camera").setData({
+            type: "Point",
+            coordinates: [cameraPosition.lng, cameraPosition.lat]
+        });
+    }
+
+    //Add a point for the location of Camera on the inset map
+    inset.on("load", () => {
+        inset.addSource("camera", {
+            type: "geojson",
+            data: {
+            type: "Point",
+            coordinates: [0, 0]
+            }
+        });
+
+        
+        // just the red point
+        inset.addLayer({
+            id: "camera-circle",
+            source: "camera",
+            type: "circle",
+            paint: {
+                "circle-color": "red",
+                "circle-radius": 4
+            }
+        });
+              
+        // the viewshed image, Enable CORS blocker to use this
+        // inset.loadImage('https://pages.uoregon.edu/infographics/dev/WMI/Camera_viewshed.png',
+        //     (error, image) => {
+        //         if (error) throw error;
+
+        //         // Add the image to the map style.
+        //         inset.addImage('camera-icon', image);
+
+        //         // Add a layer to use the image to represent the data.
+        //         inset.addLayer({
+        //             'id': 'points',
+        //             'type': 'symbol',
+        //             'source': 'camera', // reference the data source (same as red dot)
+        //             'layout': {
+        //                 'icon-image': 'camera-icon', // reference the image
+        //                 'icon-size': 0.08,
+        //                 'icon-anchor': 'bottom'
+        //             }
+        //         });
+        //     }
+        // );
+
+        
+        
+
+   }); // end on inset "load"
+
+
+    //Update the location of Camera on the inset map
+    map.on("move", () => {
+    updateCameraPositionMarker()
+    });
+
+    inset.dragPan.disable();
+    inset.scrollZoom.disable();
+    inset.boxZoom.disable();
+    inset.dragRotate.disable();
+    inset.keyboard.disable();
+    inset.doubleClickZoom.disable();
+    inset.touchZoomRotate.disable();
+    inset.touchZoomRotate.disableRotation();
+
+    function pointOnJSON(frame) {
+        real_time = (frame + maxFrame) % maxFrame;
+        return {
+            'type': 'Point',
+            'coordinates': current_migration.features[0].geometry.coordinates[parseInt(real_time)]
+        }
+    }
+    
+    function add_Snow_Layer(current_snowfall_layer) {
+        map.addLayer({
+                    'id': 'Snow_layer_' + current_snowfall_layer,
+                    'type': 'raster',
+                    'source': 'Snow_' + current_snowfall_layer,
+                    'paint': {
+                        'raster-fade-duration': 0,
+                        'raster-saturation': -0.5,
+                        // 'raster-hue-rotate': 90
+                    }
+        });
+    }
+
+    // add terrain, sky, and line layers once the style has loaded
+    map.on('load', () => {
+        map.addSource('mapbox-dem', {
+            'type': 'raster-dem',
+            'url': 'mapbox://mapbox.mapbox-terrain-dem-v1',
+            'tileSize': 512,
+            'maxzoom': 14
+        });
+        map.addSource('point', {
+        'type': 'geojson',
+        'data': pointOnJSON(maxFrame)
+        });
+        map.setTerrain({ 'source': 'mapbox-dem', 'exaggeration': 1.5 });
+        map.addLayer({
+            'id': 'sky',
+            'type': 'sky',
+            'paint': {
+                'sky-type': 'atmosphere',
+                'sky-atmosphere-sun': [0.0, 90.0],
+                'sky-atmosphere-sun-intensity': 15
+            }
+        });
+        map.addLayer({
+            'id': 'point',
+            'source': 'point',
+            'type': 'circle',
+            'paint': {
+            'circle-radius': 10,
+            'circle-color': '#f77a2b',
+            'circle-stroke-color': 'white',
+            'circle-stroke-width': 2,
+            'circle-pitch-alignment': 'map'
+        }
+        });
+    });
+
+    //Snowfall Data Setup
+    map.on('load', () => {
+        map.addSource('Snow_1', {
+            'type': 'image',
+            'url': 'https://raw.githubusercontent.com/ZhaoxuSui/UOregon/main/20190101.gif',
+            'coordinates': [
+            [-120.000000, 50.000000],
+            [-100.000000, 50.000000],
+            [-100.000000, 40.000000],
+            [-120.000000, 40.000000]
+            ]
+        });
+        map.addSource('Snow_2', {
+            'type': 'image',
+            'url': 'https://raw.githubusercontent.com/ZhaoxuSui/UOregon/main/20190102.gif',
+            'coordinates': [
+            [-120.000000, 50.000000],
+            [-100.000000, 50.000000],
+            [-100.000000, 40.000000],
+            [-120.000000, 40.000000]
+            ]
+        });
+        map.addLayer({
+                    'id': 'Snow_layer_1',
+                    'type': 'raster',
+                    'source': 'Snow_1',
+                    'paint': {
+                        'raster-fade-duration': 0,
+                        'raster-saturation': -0.5,
+                        // 'raster-hue-rotate': 90
+                    }
+        });
+    });
+
+    // wait for the terrain and sky to load before starting animation
+    map.on('load', () => {
+        const animationDuration = 23650;
+        const cameraAltitude = 60000;
+
+        // for storing map/camera properties
+        let mapBearing;
+        let mapPitch;
+
+        // get the overall distance of each route so we can interpolate along them
+        const routeDistance = turf.lineDistance(turf.lineString(targetRoute));
+        const cameraRouteDistance = turf.lineDistance(
+            turf.lineString(cameraRoute)
+        );
+
+        // get startTime at map load
+        startTime = performance.now();
+        animateMarker(0);
+
+        //camera functions
+        function frame(time) {
+            //when it is not in pausing
+            if(pause_status == false & resetTime == false) {
+                // save and update the cumulative time span when the point is moving
+                progress = time - start;
+                phase = (progress / animationDuration) % 1;
+                //console.log("running");
+                // console.log("current phase is "+ phase)
+            }
+            //when user clicks the reset button
+            if(resetTime){
+                // reset the start time equals to when it got paused
+                start = time - progress
+                console.log("reset");
+                resetTime = false;
+            }
+
+            // phase is normalized between 0 and 1
+            // when the animation is finished, reset start to loop the animation
+            if (phase > 1) {
+                // wait 0 seconds before looping
+                setTimeout(() => {
+                    start = 0.0;
+                });
+                console.log("loop ended" + phase);
+            }
+            if ( phase > 0.5 && current_snowfall_layer == 1) {
+                map.removeLayer('Snow_layer_'+current_snowfall_layer);
+                current_snowfall_layer = 2;
+                add_Snow_Layer(current_snowfall_layer);
+            }
+
+            // use the phase to get a point that is the appropriate distance along the route
+            // this approach syncs the camera and route positions ensuring they move
+            // at roughly equal rates even if they don't contain the same number of points
+            const alongRoute = turf.along(
+                turf.lineString(current_migration.features[0].geometry.coordinates),
+                routeDistance *( phase )
+            ).geometry.coordinates;
+
+            camera = map.getFreeCameraOptions();
+
+            // set the position and altitude of the camera
+                // tell the camera to look at a point along the route
+                if(bound_status){
+                    // camera.lookAtPoint({
+                    //     lng: -110,
+                    //     lat: 42
+                    // })
+
+                    // mapBearing = map.getBearing;
+                    // mapPitch = map.getPitch;
+
+                    // map.setPitch(0);
+                    // map.setBearing(0);
+                    map.fitBounds(migration_bounds, {
+                        padding: 50
+                        });
+                    window.requestAnimationFrame(frame);  // CALL A NEW FRAME
+                } else {
+
+                    camera.position = mapboxgl.MercatorCoordinate.fromLngLat(
+                    {
+                        lng: Number.parseFloat(alongRoute[0]).toFixed(5), // round to 4 decimal places
+                        lat: Number.parseFloat(alongRoute[1]-1).toFixed(5), // round to 4 decimal places
+                    },
+                    cameraAltitude);
+                    
+                    // update inset marker
+                    // camera_location.setLngLat([alongCamera[0],alongCamera[1]])
+
+                    camera.lookAtPoint({
+                        lng: Number.parseFloat(alongRoute[0]).toFixed(4), // round to 4 decimal places
+                        lat: Number.parseFloat(alongRoute[1]+0.2).toFixed(4), // round to 4 decimal places
+                    })
+                    
+                    window.requestAnimationFrame(frame);  // CALL A NEW FRAME
+                    map.setFreeCameraOptions(camera);
+                }
+        }
+
+        //pause button
+        pauseButton.addEventListener('click', () => {
+            pauseButton.classList.toggle('pause');
+            if (pauseButton.classList.contains('pause')) {
+                //stop the animation
+                cancelAnimationFrame(animation);
+                pause_status = true;
+                document.getElementById("fit").disabled = false;
+            } else {
+                // call animateMarker at time Play button is pushed
+                resetTime = true;
+                animateMarker(performance.now()); // UPDATE THE MAP
+                pause_status = false;
+                document.getElementById("fit").disabled = true;
+            }
+        });
+        
+        //bound button
+        fitButton.addEventListener('click', () => {
+            // map.fitBounds([
+            //     [32.958984, -5.353521], // southwestern corner of the bounds
+            //     [43.50585, 5.615985] // northeastern corner of the bounds
+            // ]);
+            // map.fitBounds(bounds);
+            fitButton.classList.toggle('Full_Migration_Route');
+            if (fitButton.classList.contains('Full_Migration_Route')) {
+                bound_status = true;
+            } else {
+                bound_status = false;
+            }
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            resetTime = true;
+        });
+
+        //main function
+        function animateMarker(timestamp) {
+
+            if (resetTime) {
+                // save the previous progress
+                startTime = timestamp - progress;
+            } else {
+                // save and update the cumulative time span when the point is moving
+                progress = timestamp - startTime;
+                //console.log("current progress is " + progress)
+                // before : has to move fast
+                // between and : has to move slow
+                // after : has to move fast
+            }
+            // then update the map
+            // Update the data to a new position based on the animation progress. The
+            // divisor in the expression `timestamp / 1000` controls the animation speed.
+            map.getSource('point').setData(pointOnJSON((progress)/22));
+            // Request the next frame of the animation.
+            animation = requestAnimationFrame(animateMarker); // UPDATE RECURSIVLY, comment out to stop
+            //console.log(map.getSource('point').lngLat);
+        }
+        window.requestAnimationFrame(frame); // CALL A NEW FRAME
+    });
+
+</script>
+
+
+
+</body>
+</html>
